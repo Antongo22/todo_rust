@@ -139,6 +139,7 @@ struct App {
     filter: Filter,
     selected_id: Option<u64>,
     draft: Option<Draft>,
+    confirm_clear_data: bool,
     should_quit: bool,
     status: String,
 }
@@ -160,6 +161,7 @@ impl App {
             filter: Filter::All,
             selected_id: None,
             draft: None,
+            confirm_clear_data: false,
             should_quit: false,
             status: format!("autosave -> {}", path.display()),
         };
@@ -198,6 +200,11 @@ impl App {
             return Ok(());
         }
 
+        if self.confirm_clear_data {
+            self.handle_clear_confirm_key(key)?;
+            return Ok(());
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return Ok(());
@@ -214,10 +221,24 @@ impl App {
             KeyCode::Char('e') => self.start_edit_selected(),
             KeyCode::Char('d') | KeyCode::Delete => self.delete_selected()?,
             KeyCode::Char('x') => self.purge_completed()?,
+            KeyCode::Char('X') => self.start_clear_data_confirmation(),
             KeyCode::Char('1') => self.set_filter(Filter::All),
             KeyCode::Char('2') => self.set_filter(Filter::Active),
             KeyCode::Char('3') => self.set_filter(Filter::Done),
             KeyCode::Tab | KeyCode::Char('/') => self.set_filter(self.filter.next()),
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn handle_clear_confirm_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.confirm_clear_data = false;
+                self.status = "full reset cancelled".to_string();
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.clear_all_data()?,
             _ => {}
         }
 
@@ -376,6 +397,11 @@ impl App {
         self.status = "rename task".to_string();
     }
 
+    fn start_clear_data_confirmation(&mut self) {
+        self.confirm_clear_data = true;
+        self.status = "confirm full local reset".to_string();
+    }
+
     fn create_task(&mut self, title: String) -> Result<()> {
         let task = Task {
             id: self.data.next_id,
@@ -460,6 +486,30 @@ impl App {
         Ok(())
     }
 
+    fn clear_all_data(&mut self) -> Result<()> {
+        let path = storage_path();
+        if path.exists() {
+            fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+
+        if let Some(parent) = path.parent().filter(|parent| parent.exists()) {
+            let mut entries = fs::read_dir(parent)
+                .with_context(|| format!("failed to inspect {}", parent.display()))?;
+            if entries.next().transpose()?.is_none() {
+                fs::remove_dir(parent)
+                    .with_context(|| format!("failed to remove {}", parent.display()))?;
+            }
+        }
+
+        self.data = StoredState::default();
+        self.filter = Filter::All;
+        self.selected_id = None;
+        self.draft = None;
+        self.confirm_clear_data = false;
+        self.status = "all local data removed".to_string();
+        Ok(())
+    }
+
     fn counts(&self) -> (usize, usize, usize) {
         let total = self.data.tasks.len();
         let done = self.data.tasks.iter().filter(|task| task.completed).count();
@@ -513,6 +563,8 @@ fn render(frame: &mut Frame, app: &App) {
 
     if app.draft.is_some() {
         render_draft_modal(frame, app);
+    } else if app.confirm_clear_data {
+        render_clear_data_modal(frame);
     }
 }
 
@@ -761,6 +813,7 @@ fn render_focus_panel(frame: &mut Frame, area: Rect, app: &App) {
         Line::default(),
         Line::styled("a new   e rename   d delete", Style::default().fg(TEXT)),
         Line::styled("Space toggle   x clear done", Style::default().fg(TEXT)),
+        Line::styled("Shift+X wipe data", Style::default().fg(TEXT)),
         Line::styled("1 2 3 filter   q quit", Style::default().fg(TEXT)),
         Line::default(),
         Line::styled(
@@ -796,7 +849,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(&app.status, Style::default().fg(TEXT)),
         ]),
         Line::styled(
-            "j/k navigate  enter toggle  a add  e edit  d delete  tab filter  q quit",
+            "j/k navigate  enter toggle  a add  e edit  x done  Shift+X reset  q quit",
             Style::default().fg(MUTED),
         ),
     ])
@@ -869,6 +922,37 @@ fn render_draft_modal(frame: &mut Frame, app: &App) {
             .style(Style::default().fg(MUTED)),
         layout[2],
     );
+}
+
+fn render_clear_data_modal(frame: &mut Frame) {
+    let popup = centered_rect(72, 8, frame.area());
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT))
+        .style(Style::default().bg(PANEL))
+        .title(Span::styled(
+            " Delete Local Data ",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ));
+    frame.render_widget(block, popup);
+
+    let inner = popup.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let content = Paragraph::new(vec![
+        Line::styled(
+            "This will remove all tasks and delete ~/.todo_rust/tasks.json.",
+            Style::default().fg(TEXT),
+        ),
+        Line::default(),
+        Line::styled("Press Y to confirm or Esc to cancel.", Style::default().fg(MUTED)),
+    ])
+    .wrap(Wrap { trim: true });
+    frame.render_widget(content, inner);
 }
 
 fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
